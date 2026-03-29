@@ -3,10 +3,13 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const axios = require('axios');
-const { OpenAI } = require('openai');
 const path = require('path');
+const cron = require('node-cron');
+const Groq = require('groq-sdk');
 
 dotenv.config();
+
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -14,15 +17,19 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connection error:', err));
+// Routes
+app.use('/api/plots', require('./routes/plots'));
+app.use('/api/community', require('./routes/community'));
+app.use('/api/tools', require('./routes/tools'));
 
-// OpenAI Initialization
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+// Cron: sync government data every 24 hours at 2am
+const { runGovtSync } = require('./services/govtSync');
+cron.schedule('0 2 * * *', () => runGovtSync());
+
+// MongoDB
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/urbanfarming')
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('MongoDB error:', err.message));
 
 // Chat Schema
 const chatSchema = new mongoose.Schema({
@@ -31,152 +38,142 @@ const chatSchema = new mongoose.Schema({
     role: { type: String, enum: ['user', 'assistant', 'system'], required: true },
     content: { type: String, required: true },
     timestamp: { type: Date, default: Date.now }
-  }]
+  }],
+  context: {
+    location: String, space: String, crops: [String],
+    lastQuestion: String, intent: String
+  }
 }, { timestamps: true });
 
 const Chat = mongoose.model('Chat', chatSchema);
 
-// System Prompt
-const URBAN_FARMING_SYSTEM_PROMPT = `
-You are an Urban Farming Assistant specializing in Indian agriculture and urban farming techniques. 
-Use the following knowledge to provide accurate and helpful information:
+// Extract context from user message
+function analyzeUserInput(userMessage, currentContext = {}) {
+  const u = userMessage.toLowerCase();
+  const ctx = { ...currentContext };
 
-1. Urban farming methods include vertical farming, rooftop farming, hydroponic systems, aeroponic systems, 
-   aquaponic systems, urban beekeeping, and streetscape farming.
+  if (u.includes('balcony') || u.includes('terrace')) ctx.space = 'balcony';
+  else if (u.includes('rooftop') || u.includes('roof')) ctx.space = 'rooftop';
+  else if (u.includes('window') || u.includes('sill')) ctx.space = 'window';
+  else if (u.includes('indoor') || u.includes('inside')) ctx.space = 'indoor';
+  else if (u.includes('yard') || u.includes('garden')) ctx.space = 'yard';
 
-2. In Indian context, key challenges include:
-   - Land acquisition for infrastructure development
-   - Rural-to-urban migration reducing agricultural workforce
-   - Climate change impacts on traditional farming
+  const crops = ['tomato','chili','pepper','okra','brinjal','eggplant','beans','peas',
+    'carrot','radish','spinach','lettuce','methi','fenugreek','coriander','mint','basil','tulsi','cucumber','gourd'];
+  const found = crops.filter(c => u.includes(c));
+  if (found.length > 0) ctx.crops = found;
 
-3. Vertical farming in urban settings can use up to 95% less water than traditional farming methods.
+  const cities = ['delhi','mumbai','bangalore','chennai','kolkata','hyderabad','pune','jaipur','lucknow','ahmedabad','surat','kochi','bhopal'];
+  const city = cities.find(c => u.includes(c));
+  if (city) ctx.location = city;
 
-4. Hydrogel technology can improve water retention in urban farming systems, reducing irrigation needs by
-   storing water and releasing it gradually.
+  if (['found a vacant','report empty','add rooftop','empty terrace','report plot','vacant plot'].some(p => u.includes(p)))
+    ctx.intent = 'report_plot';
+  else if (['find me a plot','vacant space near','where can i farm','find plot','nearby plot'].some(p => u.includes(p)))
+    ctx.intent = 'find_plot';
 
-5. Rooftop farming is widely practiced in Kerala, with over 20,000 rooftop farmers contributing to food security.
-
-6. Agritecture (agriculture + architecture) is the integration of farming into urban structures using facades, 
-   balconies, lobbies, and rooftops.
-
-7. Hydroponics uses nutrient-rich water to grow plants without soil, ideal for crops like lettuce, tomatoes, 
-   and strawberries.
-
-8. Aeroponics uses nutrient mist and consumes 90% less water than hydroponics while increasing crop yield 
-   by up to 75%.
-
-9. Aquaponics combines hydroponics with fish farming in a closed-loop system where fish waste fertilizes plants,
-   and plants clean water for fish.
-
-Provide practical, accurate advice tailored to the Indian context, focusing on sustainability and efficiency
-in urban environments.
-`;
-
-// 🔹 OpenFarm API Route
-app.get('/api/plants/:name', async (req, res) => {
-  try {
-    const name = req.params.name;
-    const response = await axios.get(`https://openfarm.cc/api/v1/crops/?filter=${name}`);
-    res.json(response.data);
-  } catch (error) {
-    console.error('OpenFarm API Error:', error);
-    res.status(500).json({ error: 'Failed to fetch plant data', details: error.message });
-  }
-});
-
-// 🔹 Open-Meteo API Route
-app.get('/api/weather', async (req, res) => {
-  const { lat = '28.6139', lon = '77.2090' } = req.query; // Default to Delhi coordinates
-  try {
-    const response = await axios.get(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`);
-    res.json(response.data);
-  } catch (error) {
-    console.error('Open-Meteo API Error:', error);
-    res.status(500).json({ error: 'Failed to fetch weather data', details: error.message });
-  }
-});
-
-// 🔹 Trefle API Route
-app.get('/api/trefle/:query', async (req, res) => {
-  try {
-    const query = req.params.query;
-    const response = await axios.get(`https://trefle.io/api/v1/plants/search?token=${process.env.TREFLE_API_TOKEN}&q=${query}`);
-    res.json(response.data);
-  } catch (error) {
-    console.error('Trefle API Error:', error);
-    res.status(500).json({ error: 'Failed to fetch plant info from Trefle', details: error.message });
-  }
-});
-
-// 💬 Chat Route with OpenAI
-app.post('/api/chat', async (req, res) => {
-  try {
-    const { message, userId = 'anonymous' } = req.body;
-    
-    // Log the incoming message for debugging
-    console.log(`Received message from ${userId}: ${message}`);
-    
-    let chat = await Chat.findOne({ userId });
-    if (!chat) {
-      chat = new Chat({
-        userId,
-        messages: [{ role: 'system', content: URBAN_FARMING_SYSTEM_PROMPT }]
-      });
-    }
-    
-    chat.messages.push({ role: 'user', content: message });
-
-    const openaiMessages = chat.messages.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }));
-
-    console.log('Sending request to OpenAI with messages...');
-    
-    try {
-      // Check if API key is properly set
-      if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here') {
-        throw new Error('OpenAI API key is not configured properly');
-      }
-      
-      const chatCompletion = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
-        messages: openaiMessages,
-        max_tokens: 500,
-        temperature: 0.7,
-      });
-
-      const aiResponse = chatCompletion.choices[0].message.content;
-      console.log('Received response from OpenAI');
-      
-      chat.messages.push({ role: 'assistant', content: aiResponse });
-      await chat.save();
-
-      res.json({ message: aiResponse });
-    } catch (openaiError) {
-      console.error('OpenAI API Error:', openaiError);
-      res.status(500).json({ 
-        error: 'OpenAI API Error', 
-        details: openaiError.message,
-        statusCode: openaiError.status || 'unknown'
-      });
-    }
-  } catch (error) {
-    console.error('Error processing chat:', error);
-    res.status(500).json({ error: 'Failed to process request', details: error.message });
-  }
-});
-
-// Static assets (for production)
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static('client/build'));
-  app.get('*', (req, res) => {
-    res.sendFile(path.resolve(__dirname, 'client', 'build', 'index.html'));
-  });
+  return ctx;
 }
 
-app.listen(PORT, () => {
-  console.log(`🌱 Urban Farming Server running on http://localhost:${PORT}`);
-  console.log(`OpenAI API Key configured: ${process.env.OPENAI_API_KEY ? 'Yes' : 'No'}`);
-  console.log(`Trefle API Token configured: ${process.env.TREFLE_API_TOKEN ? 'Yes' : 'No'}`);
+const SYSTEM_PROMPT = `You are an expert urban farming assistant with deep knowledge of:
+- Container gardening, rooftop farms, balcony gardens, vertical farming, hydroponics, aeroponics, and aquaponics
+- Crop selection, soil mixes, composting, organic pest control, and fertilization
+- Water conservation techniques like drip irrigation and self-watering containers
+- Indian urban farming context: regional climates, local crops (methi, coriander, okra, brinjal, tulsi, etc.), Indian cities, seasons (Kharif/Rabi/Zaid), and local resources
+- Beginner to advanced techniques, cost-effective DIY setups, and commercial-scale systems
+
+Guidelines:
+- Answer ANY question the user asks, even if not directly about urban farming
+- Be conversational, friendly, and encouraging
+- Give specific, actionable advice
+- Tailor advice to user's location, space, and crops when known
+- Use markdown formatting for readability`;
+
+// Chat endpoint
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message, userId = 'anonymous', langInstruction = '' } = req.body;
+
+    let conversationHistory = [];
+    let context = {};
+    try {
+      const chat = await Chat.findOne({ userId });
+      if (chat) {
+        context = chat.context || {};
+        conversationHistory = chat.messages
+          .filter(m => m.role !== 'system')
+          .slice(-10)
+          .map(m => ({ role: m.role, content: m.content }));
+      }
+    } catch (_) {}
+
+    context = analyzeUserInput(message, context);
+
+    let dynamicPrompt = SYSTEM_PROMPT;
+    const ctxParts = [];
+    if (context.location) ctxParts.push(`location: ${context.location}`);
+    if (context.space) ctxParts.push(`farming space: ${context.space}`);
+    if (context.crops?.length) ctxParts.push(`crops: ${context.crops.join(', ')}`);
+
+    // Live weather injection
+    if (context.location) {
+      try {
+        const coords = { delhi:[28.6139,77.2090], mumbai:[19.0760,72.8777], bangalore:[12.9716,77.5946],
+          chennai:[13.0827,80.2707], kolkata:[22.5726,88.3639], hyderabad:[17.3850,78.4867],
+          pune:[18.5204,73.8567], kochi:[9.9312,76.2673] }[context.location];
+        if (coords) {
+          const w = await axios.get(`https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&current_weather=true`);
+          const cw = w.data.current_weather;
+          ctxParts.push(`current weather: ${cw.temperature}°C, wind ${cw.windspeed} km/h`);
+        }
+      } catch (_) {}
+    }
+
+    if (ctxParts.length) dynamicPrompt += `\n\nUser context: ${ctxParts.join(', ')}. Personalize your response accordingly.`;
+    if (langInstruction) dynamicPrompt += `\n\n${langInstruction}`;
+    if (context.intent === 'report_plot') dynamicPrompt += `\n\nUser wants to report a vacant plot. Direct them to the 📍 Report a Plot page.`;
+    if (context.intent === 'find_plot') dynamicPrompt += `\n\nUser wants to find a plot. Direct them to the 🗺️ Plot Finder page.`;
+
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: dynamicPrompt },
+        ...conversationHistory,
+        { role: 'user', content: message }
+      ],
+      temperature: 0.7,
+      max_tokens: 600
+    });
+
+    const aiResponse = completion.choices[0].message.content;
+
+    try {
+      let chatDoc = await Chat.findOne({ userId });
+      if (chatDoc) {
+        chatDoc.messages.push({ role: 'user', content: message }, { role: 'assistant', content: aiResponse });
+        chatDoc.context = context;
+      } else {
+        chatDoc = new Chat({ userId, messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: message }, { role: 'assistant', content: aiResponse }], context });
+      }
+      await chatDoc.save();
+    } catch (_) {}
+
+    res.json({ message: aiResponse });
+
+  } catch (error) {
+    console.error('Chat error:', error.message);
+    let msg = 'Sorry, something went wrong. Please try again.';
+    if (error.status === 429) msg = '⚠️ Too many requests. Please wait a moment.';
+    else if (error.status === 401 || error.status === 403) msg = '⚠️ Invalid API key. Check GROQ_API_KEY in .env';
+    res.status(500).json({ error: 'Failed', details: msg });
+  }
 });
+
+app.get('/api/test', (_req, res) => res.json({ status: 'Urban Farming API is operational' }));
+
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../client/build')));
+  app.get('*', (_req, res) => res.sendFile(path.join(__dirname, '../client/build/index.html')));
+}
+
+app.listen(PORT, () => console.log(`🌱 Server running on http://localhost:${PORT}`));

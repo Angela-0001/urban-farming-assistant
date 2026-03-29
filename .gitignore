@@ -1,5 +1,23 @@
-# Ignore node_modules in both client and server
+# Dependencies
 /client/node_modules/
 server/node_modules/
 
+# Environment variables - NEVER commit these
+server/.env
+.env
+.env.local
+.env.production
 
+# Build output
+/client/build
+
+# Uploads
+server/uploads/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
