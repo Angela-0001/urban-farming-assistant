@@ -37,12 +37,31 @@ const plotSchema = new mongoose.Schema({
   images: [plotImageSchema],
   upvotes: { type: Number, default: 0 },
   suitability_score: { type: Number, min: 1, max: 10 },
-  verified: { type: Boolean, default: false }
+  verified: { type: Boolean, default: false },
+  ownerId: { type: String, default: 'anonymous' },
+  cropTypes: [{ type: String }],
+  method: { type: String, enum: ['container', 'hydroponic', 'aeroponic'], default: 'container' },
+  location: {
+    type: { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], default: [0, 0] } // [lng, lat]
+  },
+  deletedAt: { type: Date },
+  harvestLogs: [{
+    cropName: { type: String, required: true },
+    quantityKg: { type: Number, required: true },
+    notes: String,
+    loggedAt: { type: Date, default: Date.now }
+  }]
 }, { timestamps: true });
 
-// Index for geospatial queries using Haversine
+// Geospatial index (2dsphere) — required for $nearSphere queries
+plotSchema.index({ 'location.coordinates': '2dsphere' });
+// Additional indexes
 plotSchema.index({ latitude: 1, longitude: 1 });
 plotSchema.index({ city: 1, status: 1 });
+plotSchema.index({ ownerId: 1 });
+plotSchema.index({ status: 1 });
+plotSchema.index({ deletedAt: 1 });
 
 const plotRequestSchema = new mongoose.Schema({
   user_id: String,

@@ -1,16 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const multer = require('multer');
 const axios = require('axios');
-const { analyzeImage } = require('../services/imageService');
-
-const upload = multer({ dest: 'uploads/' });
-
-// Lazy-init Groq so it doesn't crash if env not loaded yet
-function getGroq() {
-  const Groq = require('groq-sdk');
-  return new Groq({ apiKey: process.env.GROQ_API_KEY });
-}
 
 // ===== WEATHER =====
 router.get('/weather', async (req, res) => {
@@ -62,120 +52,6 @@ router.get('/crop-calendar', (req, res) => {
       ? `${city} has a tropical climate — you can grow most crops year-round. Focus on heat-tolerant varieties.`
       : `It's ${season} season. Best time to plant ${urbanFriendly[season].slice(0,3).join(', ')} in containers.`
   });
-});
-
-// ===== PLANT DISEASE DETECTOR (PlantVillage dataset model) =====
-router.post('/disease-detect', upload.single('image'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Image required' });
-
-  const fs = require('fs');
-  const { getDiseaseInfo } = require('../services/diseaseKnowledge');
-
-  try {
-    const imageBuffer = fs.readFileSync(req.file.path);
-    let topLabel = null;
-    let confidence = 0;
-    let allPredictions = [];
-
-    // Step 1: Try HF Inference API with a hosted PlantVillage model
-    const HF_MODELS = [
-      'linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification',
-      'ozair23/mobilenet_v2_1.0_224-finetuned-plantdisease'
-    ];
-
-    for (const modelId of HF_MODELS) {
-      try {
-        const { HfInference } = require('@huggingface/inference');
-        const hf = new HfInference(process.env.HF_API_KEY);
-        const predictions = await hf.imageClassification({
-          model: modelId,
-          data: imageBuffer
-        });
-        if (predictions?.length > 0) {
-          allPredictions = predictions;
-          topLabel = predictions[0].label;
-          confidence = predictions[0].score;
-          console.log(`HF model ${modelId} succeeded: ${topLabel} (${Math.round(confidence*100)}%)`);
-          break;
-        }
-      } catch (hfErr) {
-        console.error(`HF model ${modelId} failed:`, hfErr.message);
-      }
-    }
-
-    // Step 2: Look up in knowledge base
-    let diseaseInfo = topLabel ? getDiseaseInfo(topLabel) : null;
-
-    // Step 3: Gemini vision fallback (if HF failed or low confidence)
-    if (!diseaseInfo || confidence < 0.4) {
-      console.log('Using Gemini vision fallback...');
-      try {
-        const { GoogleGenerativeAI } = require('@google/generative-ai');
-        const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-        const base64 = imageBuffer.toString('base64');
-        const mimeType = req.file.mimetype || 'image/jpeg';
-
-        const prompt = `You are a plant pathologist. Analyze this plant image and identify diseases or health issues.
-Respond ONLY in this exact JSON format (no markdown, no extra text):
-{"healthy":false,"issues":[{"name":"Disease Name","severity":"mild","description":"What it looks like"}],"treatments":[{"method":"Treatment name","instructions":"How to apply","organic":true}],"prevention":["tip1","tip2"],"overall_assessment":"One sentence summary"}`;
-
-        const result = await model.generateContent([
-          prompt,
-          { inlineData: { data: base64, mimeType } }
-        ]);
-        const text = result.response.text().trim();
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const geminiResult = JSON.parse(jsonMatch[0]);
-          try { fs.unlinkSync(req.file.path); } catch (_) {}
-          return res.json({
-            ...geminiResult,
-            source: 'gemini_vision',
-            model_label: topLabel,
-            confidence: topLabel ? Math.round(confidence * 100) : null
-          });
-        }
-      } catch (geminiErr) {
-        console.error('Gemini fallback error:', geminiErr.message);
-      }
-    }
-
-    try { fs.unlinkSync(req.file.path); } catch (_) {}
-
-    // If both failed but we have a label, use knowledge base anyway
-    if (!diseaseInfo) {
-      return res.json({
-        healthy: false,
-        source: 'unknown',
-        overall_assessment: 'Could not fully analyze the image. Please upload a clear, well-lit photo of the affected leaf.',
-        issues: [], treatments: [], prevention: ['Ensure good lighting', 'Focus on the affected leaf area', 'Avoid blurry images']
-      });
-    }
-
-    const isHealthy = diseaseInfo.severity === 'none';
-    res.json({
-      healthy: isHealthy,
-      source: 'plantvillage_model',
-      model_label: topLabel,
-      confidence: Math.round(confidence * 100),
-      all_predictions: allPredictions.slice(0, 3).map(p => ({
-        label: p.label.split('___').pop()?.replace(/_/g, ' ') || p.label,
-        confidence: Math.round(p.score * 100)
-      })),
-      overall_assessment: isHealthy
-        ? `Your ${diseaseInfo.plant} plant looks healthy! Keep up the good care.`
-        : `Detected: ${diseaseInfo.name} on ${diseaseInfo.plant} (${Math.round(confidence * 100)}% confidence). ${diseaseInfo.description}`,
-      issues: isHealthy ? [] : [{ name: diseaseInfo.name, severity: diseaseInfo.severity, description: diseaseInfo.description }],
-      treatments: diseaseInfo.treatments,
-      prevention: diseaseInfo.prevention
-    });
-
-  } catch (e) {
-    console.error('Disease detect error:', e.message);
-    try { require('fs').unlinkSync(req.file.path); } catch (_) {}
-    res.status(500).json({ error: e.message });
-  }
 });
 
 // ===== YIELD ESTIMATOR =====

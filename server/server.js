@@ -1,37 +1,100 @@
+const dotenv = require('dotenv');
+dotenv.config();
+
+// Validate env vars after dotenv loads
+require('./config/env').validateEnv();
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const axios = require('axios');
 const path = require('path');
 const cron = require('node-cron');
 const Groq = require('groq-sdk');
-
-dotenv.config();
+const rateLimit = require('express-rate-limit');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+// ===== CORS =====
+const corsOptions = process.env.NODE_ENV === 'production'
+  ? {
+      origin: (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean),
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']
+    }
+  : {
+      origin: true,
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']
+    };
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
-// Routes
+// ===== RATE LIMITING =====
+const chatLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: 'Too many requests, please try again later' }
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many requests, please try again later' }
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests, please try again later' }
+});
+
+app.use('/api/auth', authLimiter);
+app.use('/api/', apiLimiter);
+
+// ===== ROUTES =====
+app.use('/api/auth', require('./routes/auth'));
 app.use('/api/plots', require('./routes/plots'));
 app.use('/api/community', require('./routes/community'));
 app.use('/api/tools', require('./routes/tools'));
+app.use('/api/vacant-zones', require('./routes/vacantZones'));
 
-// Cron: sync government data every 24 hours at 2am
+// ===== CRON: sync government data every 24 hours at 2am =====
 const { runGovtSync } = require('./services/govtSync');
 cron.schedule('0 2 * * *', () => runGovtSync());
 
-// MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/urbanfarming')
+// ===== CRON: refresh OSM vacant zones every Sunday at 2am =====
+const { fetchVacantZonesForCity, CITY_BBOX } = require('./services/osmService');
+cron.schedule('0 2 * * 0', async () => {
+  console.log('🗺️  Starting weekly OSM vacant zone sync...');
+  const cities = Object.keys(CITY_BBOX);
+  for (const city of cities) {
+    try {
+      const result = await fetchVacantZonesForCity(city);
+      if (result.skipped) {
+        console.log(`  [OSM] ${city}: skipped (${result.reason})`);
+      } else {
+        console.log(`  [OSM] ${city}: upserted ${result.upserted ?? 0} zones`);
+      }
+    } catch (err) {
+      console.error(`  [OSM] ${city}: error — ${err.message}`);
+    }
+    // 5 second delay between cities to avoid hammering Overpass
+    await new Promise(r => setTimeout(r, 5000));
+  }
+  console.log('🗺️  OSM sync complete.');
+});
+
+// ===== MONGODB =====
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => console.error('MongoDB error:', err.message));
 
-// Chat Schema
+// ===== CHAT SCHEMA =====
 const chatSchema = new mongoose.Schema({
   userId: { type: String, required: true },
   messages: [{
@@ -89,7 +152,7 @@ Guidelines:
 - Tailor advice to user's location, space, and crops when known
 - Use markdown formatting for readability`;
 
-// Chat endpoint
+// ===== CHAT ENDPOINT =====
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, userId = 'anonymous', langInstruction = '' } = req.body;
@@ -113,16 +176,19 @@ app.post('/api/chat', async (req, res) => {
     const ctxParts = [];
     if (context.location) ctxParts.push(`location: ${context.location}`);
     if (context.space) ctxParts.push(`farming space: ${context.space}`);
-    if (context.crops?.length) ctxParts.push(`crops: ${context.crops.join(', ')}`);
+    if (context.crops && context.crops.length) ctxParts.push(`crops: ${context.crops.join(', ')}`);
 
-    // Live weather injection
     if (context.location) {
       try {
-        const coords = { delhi:[28.6139,77.2090], mumbai:[19.0760,72.8777], bangalore:[12.9716,77.5946],
+        const coords = {
+          delhi:[28.6139,77.2090], mumbai:[19.0760,72.8777], bangalore:[12.9716,77.5946],
           chennai:[13.0827,80.2707], kolkata:[22.5726,88.3639], hyderabad:[17.3850,78.4867],
-          pune:[18.5204,73.8567], kochi:[9.9312,76.2673] }[context.location];
+          pune:[18.5204,73.8567], kochi:[9.9312,76.2673]
+        }[context.location];
         if (coords) {
-          const w = await axios.get(`https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&current_weather=true`);
+          const w = await axios.get(
+            `https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&current_weather=true`
+          );
           const cw = w.data.current_weather;
           ctxParts.push(`current weather: ${cw.temperature}°C, wind ${cw.windspeed} km/h`);
         }
@@ -153,7 +219,15 @@ app.post('/api/chat', async (req, res) => {
         chatDoc.messages.push({ role: 'user', content: message }, { role: 'assistant', content: aiResponse });
         chatDoc.context = context;
       } else {
-        chatDoc = new Chat({ userId, messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: message }, { role: 'assistant', content: aiResponse }], context });
+        chatDoc = new Chat({
+          userId,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: message },
+            { role: 'assistant', content: aiResponse }
+          ],
+          context
+        });
       }
       await chatDoc.save();
     } catch (_) {}
@@ -175,5 +249,8 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../client/build')));
   app.get('*', (_req, res) => res.sendFile(path.join(__dirname, '../client/build/index.html')));
 }
+
+// ===== CENTRALIZED ERROR HANDLER (must be last) =====
+app.use(require('./middleware/errorHandler'));
 
 app.listen(PORT, () => console.log(`🌱 Server running on http://localhost:${PORT}`));

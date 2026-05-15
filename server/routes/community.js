@@ -3,69 +3,78 @@ const router = express.Router();
 const multer = require('multer');
 const { Comment, SuccessStory, HarvestLog } = require('../models/Community');
 const { uploadImage } = require('../services/imageService');
+const auth = require('../middleware/auth');
+const paginate = require('../utils/paginate');
 
 const upload = multer({ dest: 'uploads/' });
 
 // ===== COMMENTS =====
-router.get('/plots/:plotId/comments', async (req, res) => {
+router.get('/plots/:plotId/comments', async (req, res, next) => {
   try {
-    const comments = await Comment.find({ plot_id: req.params.plotId }).sort({ createdAt: -1 });
-    res.json(comments);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const { page = 1, limit = 20 } = req.query;
+    const query = Comment.find({ plot_id: req.params.plotId }).sort({ createdAt: -1 });
+    const result = await paginate(query, page, limit);
+    res.json(result);
+  } catch (err) { next(err); }
 });
 
-router.post('/plots/:plotId/comments', async (req, res) => {
+router.post('/plots/:plotId/comments', auth, async (req, res, next) => {
   try {
-    const comment = await Comment.create({ plot_id: req.params.plotId, ...req.body });
+    const comment = await Comment.create({ plot_id: req.params.plotId, user_id: req.user.id, ...req.body });
     res.status(201).json(comment);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (err) { next(err); }
 });
 
 // ===== SUCCESS STORIES =====
-router.get('/stories', async (req, res) => {
+router.get('/stories', async (req, res, next) => {
   try {
-    const stories = await SuccessStory.find().sort({ likes: -1, createdAt: -1 }).limit(20);
-    res.json(stories);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const { page = 1, limit = 20 } = req.query;
+    const query = SuccessStory.find().sort({ likes: -1, createdAt: -1 });
+    const result = await paginate(query, page, limit);
+    res.json(result);
+  } catch (err) { next(err); }
 });
 
-router.post('/stories', upload.fields([{ name: 'before', maxCount: 1 }, { name: 'after', maxCount: 1 }]), async (req, res) => {
+router.post('/stories', auth, upload.fields([{ name: 'before', maxCount: 1 }, { name: 'after', maxCount: 1 }]), async (req, res, next) => {
   try {
-    const data = { ...req.body };
+    const data = { ...req.body, user_id: req.user.id };
     if (req.files?.before) data.before_image = await uploadImage(req.files.before[0].path);
     if (req.files?.after) data.after_image = await uploadImage(req.files.after[0].path);
     const story = await SuccessStory.create(data);
     res.status(201).json(story);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (err) { next(err); }
 });
 
-router.post('/stories/:id/like', async (req, res) => {
+router.post('/stories/:id/like', async (req, res, next) => {
   try {
     const story = await SuccessStory.findByIdAndUpdate(req.params.id, { $inc: { likes: 1 } }, { new: true });
+    if (!story) return res.status(404).json({ error: 'Story not found' });
     res.json({ likes: story.likes });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (err) { next(err); }
 });
 
 // ===== HARVEST LOGS =====
-router.get('/harvest/:userId', async (req, res) => {
+router.get('/harvest/:userId', async (req, res, next) => {
   try {
-    const logs = await HarvestLog.find({ user_id: req.params.userId }).sort({ date: -1 });
-    res.json(logs);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const { page = 1, limit = 20 } = req.query;
+    const query = HarvestLog.find({ user_id: req.params.userId }).sort({ date: -1 });
+    const result = await paginate(query, page, limit);
+    res.json(result);
+  } catch (err) { next(err); }
 });
 
-router.post('/harvest', async (req, res) => {
+router.post('/harvest', auth, async (req, res, next) => {
   try {
-    const log = await HarvestLog.create(req.body);
+    const log = await HarvestLog.create({ ...req.body, user_id: req.user.id });
     res.status(201).json(log);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (err) { next(err); }
 });
 
-router.delete('/harvest/:id', async (req, res) => {
+router.delete('/harvest/:id', auth, async (req, res, next) => {
   try {
     await HarvestLog.findByIdAndDelete(req.params.id);
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

@@ -30,6 +30,9 @@ const harvestLogSchema = new mongoose.Schema({
   space_sqft: Number
 }, { timestamps: true });
 
+successStorySchema.index({ city: 1 });
+successStorySchema.index({ createdAt: -1 });
+
 const Comment = mongoose.model('Comment', commentSchema);
 const SuccessStory = mongoose.model('SuccessStory', successStorySchema);
 const HarvestLog = mongoose.model('HarvestLog', harvestLogSchema);
