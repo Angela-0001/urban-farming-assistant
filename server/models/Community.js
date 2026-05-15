@@ -32,6 +32,8 @@ const harvestLogSchema = new mongoose.Schema({
 
 successStorySchema.index({ city: 1 });
 successStorySchema.index({ createdAt: -1 });
+commentSchema.index({ plot_id: 1 });
+harvestLogSchema.index({ user_id: 1 });
 
 const Comment = mongoose.model('Comment', commentSchema);
 const SuccessStory = mongoose.model('SuccessStory', successStorySchema);

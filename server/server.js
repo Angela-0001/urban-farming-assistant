@@ -18,6 +18,15 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// ===== SECURITY HEADERS =====
+const helmet = require('helmet');
+app.use(helmet({ contentSecurityPolicy: false }));
+
+// Warn if JWT_SECRET is still the default placeholder
+if (process.env.JWT_SECRET === 'your_super_secret_key_change_this') {
+  console.warn('⚠️  WARNING: JWT_SECRET is set to the default placeholder. Change it in .env immediately!');
+}
+
 // ===== CORS =====
 const corsOptions = process.env.NODE_ENV === 'production'
   ? {
@@ -32,7 +41,7 @@ const corsOptions = process.env.NODE_ENV === 'production'
     };
 
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // ===== RATE LIMITING =====
 const chatLimiter = rateLimit({
@@ -230,7 +239,9 @@ app.post('/api/chat', async (req, res) => {
         });
       }
       await chatDoc.save();
-    } catch (_) {}
+    } catch (saveErr) {
+      console.error('Chat history save error:', saveErr.message);
+    }
 
     res.json({ message: aiResponse });
 

@@ -1,12 +1,12 @@
 # Urban Farming Assistant
 
-A Node.js/Express/MongoDB backend for an urban farming assistant app targeting Indian cities. It combines AI-powered chat (Groq LLaMA 3.3 70B), geospatial plot discovery, plant disease detection (HuggingFace + Gemini), and agricultural tools (crop calendar, yield estimator, watering scheduler, shopping list) into a single API.
+A Node.js/Express/MongoDB backend for an urban farming assistant app targeting Indian cities. It combines AI-powered chat (Groq LLaMA 3.3 70B), geospatial plot discovery, and agricultural tools (crop calendar, yield estimator, watering scheduler, shopping list) into a single API.
 
 ## Prerequisites
 
 - Node.js 18+
 - MongoDB 6+
-- API keys: `GROQ_API_KEY`, `GEMINI_API_KEY`, `HUGGINGFACE_API_KEY`
+- API keys: `GROQ_API_KEY`, `GEMINI_API_KEY`
 - A `JWT_SECRET` (any long random string)
 
 ## Setup

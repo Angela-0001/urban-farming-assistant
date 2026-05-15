@@ -20,7 +20,16 @@ const plotCreate = Joi.object({
   name: Joi.string().trim().min(2).max(100).required(),
   city: Joi.string().trim().min(2).max(50).required(),
   location: Joi.object({
-    coordinates: Joi.array().items(Joi.number()).length(2).required()
+    coordinates: Joi.array()
+      .items(Joi.number())
+      .length(2)
+      .custom((val, helpers) => {
+        const [lng, lat] = val;
+        if (lng < -180 || lng > 180) return helpers.error('any.invalid');
+        if (lat < -90 || lat > 90) return helpers.error('any.invalid');
+        return val;
+      })
+      .required()
   }).required(),
   spaceType: Joi.string()
     .valid('rooftop', 'terrace', 'balcony', 'sidewalk', 'vacant_land', 'community_garden', 'parking_lot', 'wall', 'other')
@@ -61,6 +70,24 @@ const chatMessage = Joi.object({
   sessionId: Joi.string().optional()
 });
 
+const commentCreate = Joi.object({
+  message: Joi.string().trim().min(1).max(1000).required(),
+  name: Joi.string().trim().max(50).optional()
+});
+
+const storyCreate = Joi.object({
+  title: Joi.string().trim().min(3).max(150).required(),
+  story: Joi.string().trim().min(10).max(3000).required(),
+  city: Joi.string().trim().max(50).optional(),
+  crop: Joi.string().trim().max(100).optional()
+});
+
+const harvestLogCreate = Joi.object({
+  crop: Joi.string().trim().min(1).max(100).required(),
+  quantity_kg: Joi.number().positive().required(),
+  notes: Joi.string().max(500).optional()
+});
+
 const SUPPORTED_CITIES = ['mumbai','delhi','bangalore','chennai','hyderabad','pune','kolkata','ahmedabad','jaipur','surat'];
 
 const vacantZoneReport = Joi.object({
@@ -77,5 +104,5 @@ const vacantZoneReport = Joi.object({
 
 module.exports = {
   validate,
-  schemas: { plotCreate, plotUpdate, harvestLog, authRegister, authLogin, chatMessage, vacantZoneReport }
+  schemas: { plotCreate, plotUpdate, harvestLog, authRegister, authLogin, chatMessage, vacantZoneReport, commentCreate, storyCreate, harvestLogCreate }
 };
